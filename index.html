@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>مرئي MP3</title>
+<style>
+:root{
+  --bg:#eef1f7; --panel:#ffffff; --ink:#16213e; --muted:#5b6785; --line:#d5dbe8;
+  --a:#e0861a; --b:#1b9aa6; --btn:#16213e; --btnink:#ffffff;
+  box-sizing:border-box; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1830; --panel:#16223f; --ink:#eaf0ff; --muted:#93a1c6; --line:#27355c;
+    --a:#ffb547; --b:#5ad1d9; --btn:#eaf0ff; --btnink:#0f1830; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1830; --panel:#16223f; --ink:#eaf0ff; --muted:#93a1c6; --line:#27355c;
+  --a:#ffb547; --b:#5ad1d9; --btn:#eaf0ff; --btnink:#0f1830; color-scheme:dark;
+}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;min-height:100vh;display:flex;justify-content:center}
+main{width:100%;max-width:640px;padding:18px 16px 28px;display:flex;flex-direction:column;gap:14px}
+h1{font-size:1.25rem;margin:0}
+.title{color:var(--muted);font-size:.95rem;min-height:1.4em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#stage{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:18px;overflow:hidden;aspect-ratio:1/1;max-height:62vh;width:100%}
+canvas{display:block;width:100%;height:100%}
+#empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center;padding:24px;color:var(--muted)}
+#empty.hide{display:none}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible,input:focus-visible{outline:3px solid var(--b);outline-offset:2px}
+.primary{background:var(--btn);color:var(--btnink);border:0;border-radius:999px;padding:12px 22px;font-weight:600}
+.row{display:flex;align-items:center;gap:12px}
+#play{width:56px;height:56px;border-radius:50%;border:0;background:var(--btn);color:var(--btnink);font-size:1.3rem;flex:none}
+#play:disabled{opacity:.4;cursor:default}
+.seek{flex:1;display:flex;flex-direction:column;gap:4px;direction:ltr}
+input[type=range]{width:100%;accent-color:var(--a)}
+.times{display:flex;justify-content:space-between;font-size:.8rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.modes{display:flex;gap:8px}
+.modes button{flex:1;padding:10px;border:1px solid var(--line);background:var(--panel);border-radius:12px}
+.modes button[aria-pressed="true"]{border-color:var(--a);box-shadow:inset 0 0 0 1px var(--a);font-weight:600}
+#msg{min-height:1.2em;color:var(--a);font-size:.9rem}
+</style>
+</head>
+<body>
+<main>
+  <h1>مرئي MP3</h1>
+  <div class="title" id="name">لم يتم اختيار ملف</div>
+  <div id="stage">
+    <canvas id="cv" aria-label="عرض مرئي للصوت"></canvas>
+    <div id="empty">
+      <div>اختر ملف MP3 من جهازك أو اسحبه إلى هنا</div>
+      <button class="primary" id="pick">اختيار ملف MP3</button>
+    </div>
+  </div>
+  <div id="msg" role="status"></div>
+  <div class="row">
+    <button id="play" disabled aria-label="تشغيل">▶</button>
+    <div class="seek">
+      <input type="range" id="seek" min="0" max="1000" value="0" disabled aria-label="موضع التشغيل">
+      <div class="times"><span id="cur">0:00</span><span id="dur">0:00</span></div>
+    </div>
+  </div>
+  <div class="modes" role="group" aria-label="نمط العرض">
+    <button data-m="bars" aria-pressed="true">أعمدة</button>
+    <button data-m="wave" aria-pressed="false">موجة</button>
+    <button data-m="ring" aria-pressed="false">دائرة</button>
+  </div>
+  <input type="file" id="file" accept="audio/mpeg,.mp3" hidden>
+  <audio id="au" preload="metadata"></audio>
+</main>
+<script>
+(function(){
+  var $=function(i){return document.getElementById(i)};
+  var au=$('au'),cv=$('cv'),ctx=cv.getContext('2d'),playBtn=$('play'),seek=$('seek');
+  var ac=null,an=null,freq=null,wave=null,mode='bars',raf=0,url=null,dragging=false;
+
+  function fmt(s){s=Math.max(0,Math.floor(s||0));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')}
+  function msg(t){$('msg').textContent=t||''}
+  function css(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
+
+  function fit(){
+    var r=cv.getBoundingClientRect(),d=window.devicePixelRatio||1;
+    cv.width=Math.max(1,Math.round(r.width*d));cv.height=Math.max(1,Math.round(r.height*d));
+    draw();
+  }
+  new ResizeObserver(fit).observe(cv);
+
+  function setup(){
+    if(ac) return;
+    var C=window.AudioContext||window.webkitAudioContext;
+    ac=new C();an=ac.createAnalyser();an.fftSize=1024;an.smoothingTimeConstant=0.8;
+    var src=ac.createMediaElementSource(au);src.connect(an);an.connect(ac.destination);
+    freq=new Uint8Array(an.frequencyBinCount);wave=new Uint8Array(an.fftSize);
+  }
+
+  function grad(x0,y0,x1,y1){var g=ctx.createLinearGradient(x0,y0,x1,y1);g.addColorStop(0,css('--b'));g.addColorStop(1,css('--a'));return g}
+
+  function draw(){
+    var w=cv.width,h=cv.height;ctx.clearRect(0,0,w,h);
+    var live=an&&!au.paused;
+    if(an){an.getByteFrequencyData(freq);an.getByteTimeDomainData(wave)}
+    var d=window.devicePixelRatio||1;
+    if(mode==='bars'){
+      var n=48,gap=4*d,bw=(w-gap*(n+1))/n,usable=Math.floor(freq?freq.length*0.65:n);
+      ctx.fillStyle=grad(0,h,0,0);
+      for(var i=0;i<n;i++){
+        var v=freq?freq[Math.floor(Math.pow(i/n,1.6)*usable)]/255:0;
+        var bh=Math.max(4*d,v*h*0.9);
+        var x=gap+i*(bw+gap);
+        ctx.beginPath();ctx.roundRect?ctx.roundRect(x,h-bh-8*d,bw,bh,bw/2):ctx.rect(x,h-bh-8*d,bw,bh);ctx.fill();
+      }
+    }else if(mode==='wave'){
+      ctx.lineWidth=3*d;ctx.lineJoin='round';ctx.strokeStyle=grad(0,0,w,0);ctx.beginPath();
+      var len=wave?wave.length:2;
+      for(var j=0;j<len;j++){
+        var y=wave?(wave[j]/255)*h:h/2,xx=j/(len-1)*w;
+        j?ctx.lineTo(xx,y):ctx.moveTo(xx,y);
+      }
+      ctx.stroke();
+    }else{
+      var cx=w/2,cy=h/2,r0=Math.min(w,h)*0.22,m=96,rm=Math.min(w,h)*0.26;
+      ctx.lineWidth=3*d;ctx.lineCap='round';ctx.strokeStyle=grad(0,0,w,h);
+      var us=Math.floor(freq?freq.length*0.65:m);
+      for(var k=0;k<m;k++){
+        var vv=freq?freq[Math.floor(Math.pow(k/m,1.4)*us)]/255:0,a=k/m*Math.PI*2-Math.PI/2,L=4*d+vv*rm;
+        ctx.beginPath();ctx.moveTo(cx+Math.cos(a)*r0,cy+Math.sin(a)*r0);ctx.lineTo(cx+Math.cos(a)*(r0+L),cy+Math.sin(a)*(r0+L));ctx.stroke();
+      }
+    }
+    if(live) raf=requestAnimationFrame(draw);
+  }
+  function loop(){cancelAnimationFrame(raf);raf=requestAnimationFrame(draw)}
+
+  function load(f){
+    if(!f) return;
+    if(!(f.type==='audio/mpeg'||/\.mp3$/i.test(f.name))){msg('هذا الملف ليس MP3. اختر ملفاً بصيغة MP3 فقط.');return}
+    msg('');
+    if(url) URL.revokeObjectURL(url);
+    url=URL.createObjectURL(f);au.src=url;
+    $('name').textContent=f.name;$('empty').classList.add('hide');
+    playBtn.disabled=false;seek.disabled=false;
+    au.play().catch(function(){msg('اضغط زر التشغيل للبدء.')});
+  }
+
+  function toggle(){
+    setup();
+    if(ac.state==='suspended') ac.resume();
+    au.paused?au.play():au.pause();
+  }
+
+  $('pick').onclick=function(){$('file').click()};
+  $('name').onclick=function(){$('file').click()};
+  $('file').onchange=function(e){load(e.target.files[0]);e.target.value=''};
+  playBtn.onclick=toggle;
+  au.addEventListener('play',function(){setup();if(ac.state==='suspended')ac.resume();playBtn.textContent='⏸';playBtn.setAttribute('aria-label','إيقاف مؤقت');loop()});
+  au.addEventListener('pause',function(){playBtn.textContent='▶';playBtn.setAttribute('aria-label','تشغيل')});
+  au.addEventListener('ended',function(){playBtn.textContent='▶'});
+  au.addEventListener('loadedmetadata',function(){$('dur').textContent=fmt(au.duration)});
+  au.addEventListener('error',function(){msg('تعذر تشغيل هذا الملف. جرّب ملف MP3 آخر.')});
+  au.addEventListener('timeupdate',function(){
+    $('cur').textContent=fmt(au.currentTime);
+    if(!dragging&&au.duration) seek.value=Math.round(au.currentTime/au.duration*1000);
+  });
+  seek.addEventListener('input',function(){dragging=true;if(au.duration){au.currentTime=seek.value/1000*au.duration;$('cur').textContent=fmt(au.currentTime)}});
+  seek.addEventListener('change',function(){dragging=false});
+
+  document.querySelectorAll('.modes button').forEach(function(b){
+    b.onclick=function(){
+      mode=b.dataset.m;
+      document.querySelectorAll('.modes button').forEach(function(x){x.setAttribute('aria-pressed',x===b?'true':'false')});
+      draw();
+    };
+  });
+
+  var st=$('stage');
+  ['dragover','dragenter'].forEach(function(t){st.addEventListener(t,function(e){e.preventDefault()})});
+  st.addEventListener('drop',function(e){e.preventDefault();load(e.dataTransfer.files[0])});
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change',draw);
+  fit();
+})();
+</script>
+</body>
+</html>
